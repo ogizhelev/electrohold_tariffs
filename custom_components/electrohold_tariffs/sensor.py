@@ -47,35 +47,87 @@ class ElectricityTariffSensor(SensorEntity):
             value_elements = soup.find_all(string=["Дневна", "Нощна"])
 
             for element in value_elements:
+                parent_td = element.find_parent('td')
+                if not parent_td:
+                    continue
+
+                next_td = parent_td.find_next_sibling('td')
+                if not next_td:
+                    continue
+
+                value_text = next_td.text.strip().replace(',', '.')
+                # Extract numeric part only
+                import re
+                value_number = re.findall(r"[\d.]+", value_text)
+                if not value_number:
+                    _LOGGER.error(f"Could not extract numeric value from: {value_text}")
+                    continue
+
+                numeric_value = float(value_number[0])
+
                 if "Дневна" in element.strip():
-                    next_element = element.find_parent('td').find_next_sibling('td')
-                    if next_element:
-                        day_value = next_element.text.strip().replace(',', '.')
-                        try:
-                            day = float(day_value)
-                        except ValueError:
-                            _LOGGER.error(f"Error converting day value: {day_value}")
+                    day = numeric_value
+                elif "Нощна" in element.strip():
+                    night = numeric_value
 
-                if "Нощна" in element.strip():
-                    next_element = element.find_parent('td').find_next_sibling('td')
-                    if next_element:
-                        night_value = next_element.text.strip().replace(',', '.')
-                        try:
-                            night = float(night_value)
-                        except ValueError:
-                            _LOGGER.error(f"Error converting night value: {night_value}")
-
-            day_tarrif = round((day + 0.06424) * 1.2, 5) if day is not None else None
-            night_tarrif = round((night + 0.06424) * 1.2, 5) if night is not None else None
+            # Apply your markup and rounding
+            day_tariff = round((day + 0.06424) * 1.2, 5) if day is not None else None
+            night_tariff = round((night + 0.06424) * 1.2, 5) if night is not None else None
 
             if self._sensor_type == "day_tarrif":
-                self._state = day_tarrif
+                self._state = day_tariff
             elif self._sensor_type == "night_tarrif":
-                self._state = night_tarrif
+                self._state = night_tariff
 
         except Exception as e:
             _LOGGER.error(f"Error fetching electricity tariff data: {e}")
             self._state = None
+
+
+    # def update(self):
+    #     """Fetch the current value from the website and update the sensor state."""
+    #     try:
+    #         url = "https://electrohold.bg/bg/sales/domakinstva/snabdyavane-po-regulirani-ceni/"
+    #         response = requests.get(url, timeout=5)
+    #         response.raise_for_status()
+
+    #         soup = BeautifulSoup(response.text, 'html.parser')
+
+    #         night = None
+    #         day = None
+
+    #         value_elements = soup.find_all(string=["Дневна", "Нощна"])
+
+    #         for element in value_elements:
+    #             if "Дневна" in element.strip():
+    #                 next_element = element.find_parent('td').find_next_sibling('td')
+    #                 if next_element:
+    #                     day_value = next_element.text.strip().replace(',', '.')
+    #                     try:
+    #                         day = float(day_value)
+    #                     except ValueError:
+    #                         _LOGGER.error(f"Error converting day value: {day_value}")
+
+    #             if "Нощна" in element.strip():
+    #                 next_element = element.find_parent('td').find_next_sibling('td')
+    #                 if next_element:
+    #                     night_value = next_element.text.strip().replace(',', '.')
+    #                     try:
+    #                         night = float(night_value)
+    #                     except ValueError:
+    #                         _LOGGER.error(f"Error converting night value: {night_value}")
+
+    #         day_tarrif = round((day + 0.06424) * 1.2, 5) if day is not None else None
+    #         night_tarrif = round((night + 0.06424) * 1.2, 5) if night is not None else None
+
+    #         if self._sensor_type == "day_tarrif":
+    #             self._state = day_tarrif
+    #         elif self._sensor_type == "night_tarrif":
+    #             self._state = night_tarrif
+
+    #     except Exception as e:
+    #         _LOGGER.error(f"Error fetching electricity tariff data: {e}")
+    #         self._state = None
 
     @property
     def name(self):
