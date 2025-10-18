@@ -3,25 +3,47 @@ import logging
 import requests
 from bs4 import BeautifulSoup
 from datetime import timedelta
-from homeassistant.components.sensor import SensorEntity
+import pytz
+import voluptuous as vol
+from homeassistant.components.sensor import SensorEntity, PLATFORM_SCHEMA
 from homeassistant.const import CONF_NAME, CONF_UNIT_OF_MEASUREMENT
+from homeassistant.util import dt as dt_util
+import homeassistant.helpers.config_validation as cv
 
 _LOGGER = logging.getLogger(__name__)
 
+# Configuration constants
+CONF_TIMEZONE = "timezone"
+DEFAULT_TIMEZONE = "Europe/Sofia"
+
+# Configuration schema
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
+    vol.Optional(CONF_TIMEZONE, default=DEFAULT_TIMEZONE): cv.string,
+})
+
 # Set to 5 minutes for initial testing, change back to timedelta(days=1) after first successful update
-# Set the scan interval to update daily
+# Set the scan interval to update daily for base tariff sensors
+# Current price sensors will use a shorter interval to switch between day/night
 SCAN_INTERVAL = timedelta(days=1)
+CURRENT_PRICE_SCAN_INTERVAL = timedelta(minutes=30)
 
 def setup_platform(hass, config, add_entities, discovery_info=None):
     """Set up the electricity tariff sensors."""
 
+    # Get timezone configuration, default to Europe/Sofia (Bulgaria)
+    timezone = config.get(CONF_TIMEZONE, DEFAULT_TIMEZONE)
+    
     day_sensor = ElectricityTariffSensor("day_tariff", "Day", "electrohold_tariff_day", "BGN/kWh")
     night_sensor = ElectricityTariffSensor("night_tariff", "Night", "electrohold_tariff_night", "BGN/kWh")
     day_euro_sensor = ElectricityTariffSensor("day_tariff_euro", "Day Euro", "electrohold_tariff_day_euro", "EUR/kWh")
     night_euro_sensor = ElectricityTariffSensor("night_tariff_euro", "Night Euro", "electrohold_tariff_night_euro", "EUR/kWh")
+    
+    # Current price sensors that automatically switch between day/night based on time and season
+    current_price_bgn_sensor = ElectroholdCurrentPriceSensor(hass, "bgn", "Current Price BGN", "electrohold_current_price_bgn", "BGN/kWh", timezone)
+    current_price_euro_sensor = ElectroholdCurrentPriceSensor(hass, "euro", "Current Price EURO", "electrohold_current_price_euro", "EUR/kWh", timezone)
 
     # Don't update during setup - let Home Assistant handle the update cycle
-    add_entities([day_sensor, night_sensor, day_euro_sensor, night_euro_sensor])
+    add_entities([day_sensor, night_sensor, day_euro_sensor, night_euro_sensor, current_price_bgn_sensor, current_price_euro_sensor])
 
 class ElectricityTariffSensor(SensorEntity):
     """Representation of a Sensor to expose electricity tariff data."""
@@ -176,3 +198,192 @@ class ElectricityTariffSensor(SensorEntity):
     def unique_id(self):
         """Return a unique ID for the sensor."""
         return self._unique_id
+
+
+class ElectroholdCurrentPriceSensor(SensorEntity):
+    """Representation of a Current Price Sensor that switches between day/night tariffs based on time and season."""
+
+    def __init__(self, hass, currency_type, label, unique_id, unit_of_measurement, timezone='Europe/Sofia'):
+        """Initialize the current price sensor."""
+        self._hass = hass
+        self._currency_type = currency_type  # "bgn" or "euro"
+        self._label = label
+        self._unique_id = unique_id
+        self._state = None
+        self._unit_of_measurement = unit_of_measurement
+        self._attr_should_poll = True
+        
+        # Timezone handling
+        try:
+            self._timezone = pytz.timezone(timezone)
+        except pytz.UnknownTimeZoneError:
+            _LOGGER.warning(f"Unknown timezone '{timezone}', falling back to Europe/Sofia")
+            self._timezone = pytz.timezone('Europe/Sofia')
+        
+        # Additional attributes
+        self._tariff_type = None
+        self._season = None
+        self._day_tariff = None
+        self._night_tariff = None
+        
+        # Override scan interval for current price sensors
+        self._scan_interval = CURRENT_PRICE_SCAN_INTERVAL
+        
+        _LOGGER.info(f"Initializing current price sensor {self._currency_type} with timezone {self._timezone}")
+        
+        # Perform initial update
+        self.update()
+
+    def update(self):
+        """Update the sensor state based on current time and season."""
+        try:
+            # Get current time in the configured timezone
+            utc_now = dt_util.utcnow()
+            local_now = utc_now.astimezone(self._timezone)
+            hour = local_now.hour
+            month = local_now.month
+            
+            _LOGGER.debug(f"Current time in {self._timezone}: {local_now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            _LOGGER.debug(f"Season: {'Summer' if is_summer else 'Winter'}, Is night: {is_night}, Hour: {hour}, Month: {month}")
+            
+            # Determine if it's summer (April-October) or winter (November-March)
+            is_summer = 4 <= month <= 10
+            
+            # Determine if it's night time based on season
+            if is_summer:
+                # Summer: Night rate 23:00-07:00
+                is_night = hour >= 23 or hour < 7
+            else:
+                # Winter: Night rate 22:00-06:00
+                is_night = hour >= 22 or hour < 6
+            
+            # Get the appropriate sensor entity IDs based on currency type
+            if self._currency_type == "bgn":
+                day_sensor_id = "sensor.electrohold_tariff_day"
+                night_sensor_id = "sensor.electrohold_tariff_night"
+            else:  # euro
+                day_sensor_id = "sensor.electrohold_tariff_day_euro"
+                night_sensor_id = "sensor.electrohold_tariff_night_euro"
+            
+            # Get the current tariff values from the base sensors
+            if is_night:
+                night_state = self._hass.states.get(night_sensor_id)
+                self._state = float(night_state.state) if night_state and night_state.state not in ['unknown', 'unavailable'] else None
+                self._tariff_type = f"Night ({'Summer' if is_summer else 'Winter'})"
+            else:
+                day_state = self._hass.states.get(day_sensor_id)
+                self._state = float(day_state.state) if day_state and day_state.state not in ['unknown', 'unavailable'] else None
+                self._tariff_type = f"Day ({'Summer' if is_summer else 'Winter'})"
+            
+            # Set season attribute
+            self._season = "Summer" if is_summer else "Winter"
+            
+            # Get day and night tariff values for attributes
+            day_state = self._hass.states.get(day_sensor_id)
+            night_state = self._hass.states.get(night_sensor_id)
+            
+            self._day_tariff = day_state.state if day_state and day_state.state not in ['unknown', 'unavailable'] else None
+            self._night_tariff = night_state.state if night_state and night_state.state not in ['unknown', 'unavailable'] else None
+            
+            _LOGGER.debug(f"Current price sensor {self._currency_type} updated: {self._state} ({self._tariff_type})")
+            
+        except Exception as e:
+            _LOGGER.error(f"Error updating current price sensor {self._currency_type}: {e}")
+            # Keep the previous state if available
+
+    @property
+    def name(self):
+        """Return the name of the sensor."""
+        return f"Electrohold {self._label}"
+
+    @property
+    def state(self):
+        """Return the state of the sensor."""
+        return self._state
+
+    @property
+    def available(self):
+        """Return True if entity is available."""
+        return self._state is not None
+
+    @property
+    def unit_of_measurement(self):
+        """Return the unit of measurement."""
+        return self._unit_of_measurement
+
+    @property
+    def device_class(self):
+        """Return the class of the device."""
+        return "monetary"
+
+    @property
+    def icon(self):
+        """Return the icon for the sensor."""
+        return "mdi:currency-eur"
+
+    @property
+    def unique_id(self):
+        """Return a unique ID for the sensor."""
+        return self._unique_id
+
+    @property
+    def scan_interval(self):
+        """Return the scan interval for this sensor."""
+        return self._scan_interval
+
+    @property
+    def extra_state_attributes(self):
+        """Return additional state attributes."""
+        # Get current time in the configured timezone
+        utc_now = dt_util.utcnow()
+        local_now = utc_now.astimezone(self._timezone)
+        
+        attributes = {
+            "tariff_type": self._tariff_type,
+            "season": self._season,
+            "day_tariff": self._day_tariff,
+            "night_tariff": self._night_tariff,
+            "last_updated": local_now.strftime('%Y-%m-%d %H:%M:%S %Z'),
+            "timezone": str(self._timezone)
+        }
+        
+        # Get the appropriate sensor entity IDs based on currency type
+        if self._currency_type == "bgn":
+            day_sensor_id = "sensor.electrohold_tariff_day"
+            night_sensor_id = "sensor.electrohold_tariff_night"
+        else:  # euro
+            day_sensor_id = "sensor.electrohold_tariff_day_euro"
+            night_sensor_id = "sensor.electrohold_tariff_night_euro"
+        
+        # Add last updated timestamps for base sensors
+        try:
+            day_state = self._hass.states.get(day_sensor_id)
+            night_state = self._hass.states.get(night_sensor_id)
+            
+            if day_state and hasattr(day_state, 'last_updated'):
+                # Convert UTC timestamp to local timezone
+                day_local_time = day_state.last_updated.astimezone(self._timezone)
+                attributes["day_tariff_last_updated"] = day_local_time.strftime('%Y-%m-%d %H:%M:%S %Z')
+                
+            if night_state and hasattr(night_state, 'last_updated'):
+                # Convert UTC timestamp to local timezone
+                night_local_time = night_state.last_updated.astimezone(self._timezone)
+                attributes["night_tariff_last_updated"] = night_local_time.strftime('%Y-%m-%d %H:%M:%S %Z')
+            
+            # Add current tariff last updated (whichever is currently active)
+            utc_now_for_calc = dt_util.utcnow()
+            local_now_for_calc = utc_now_for_calc.astimezone(self._timezone)
+            hour = local_now_for_calc.hour
+            month = local_now_for_calc.month
+            is_summer = 4 <= month <= 10
+            is_night = (hour >= 23 or hour < 7) if is_summer else (hour >= 22 or hour < 6)
+            
+            current_state = night_state if is_night else day_state
+            if current_state and hasattr(current_state, 'last_updated'):
+                current_local_time = current_state.last_updated.astimezone(self._timezone)
+                attributes["current_tariff_last_updated"] = current_local_time.strftime('%Y-%m-%d %H:%M:%S %Z')
+                
+        except Exception as e:
+            _LOGGER.warning(f"Error getting timestamps for current price sensor {self._currency_type}: {e}")
+        
+        return attributes
