@@ -246,7 +246,6 @@ class ElectroholdCurrentPriceSensor(SensorEntity):
             month = local_now.month
             
             _LOGGER.debug(f"Current time in {self._timezone}: {local_now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-            _LOGGER.debug(f"Season: {'Summer' if is_summer else 'Winter'}, Is night: {is_night}, Hour: {hour}, Month: {month}")
             
             # Determine if it's summer (April-October) or winter (November-March)
             is_summer = 4 <= month <= 10
@@ -259,6 +258,8 @@ class ElectroholdCurrentPriceSensor(SensorEntity):
                 # Winter: Night rate 22:00-06:00
                 is_night = hour >= 22 or hour < 6
             
+            _LOGGER.debug(f"Season: {'Summer' if is_summer else 'Winter'}, Is night: {is_night}, Hour: {hour}, Month: {month}")
+            
             # Get the appropriate sensor entity IDs based on currency type
             if self._currency_type == "bgn":
                 day_sensor_id = "sensor.electrohold_tariff_day"
@@ -267,33 +268,42 @@ class ElectroholdCurrentPriceSensor(SensorEntity):
                 day_sensor_id = "sensor.electrohold_tariff_day_euro"
                 night_sensor_id = "sensor.electrohold_tariff_night_euro"
             
+            # Debug: Check what we're getting from base sensors
+            day_state_check = self._hass.states.get(day_sensor_id)
+            night_state_check = self._hass.states.get(night_sensor_id)
+            _LOGGER.debug(f"Base sensor check for {self._currency_type}: day={day_state_check.state if day_state_check else 'None'}, night={night_state_check.state if night_state_check else 'None'}")
+            
             # Get the current tariff values from the base sensors
             base_sensors_available = True
             current_tariff_value = None
             
             if is_night:
                 night_state = self._hass.states.get(night_sensor_id)
-                if night_state and night_state.state not in ['unknown', 'unavailable', None]:
+                _LOGGER.debug(f"Night time - checking {night_sensor_id}: state={night_state.state if night_state else 'None'}, exists={night_state is not None}")
+                if night_state and night_state.state not in ['unknown', 'unavailable', None] and night_state.state is not None:
                     try:
                         current_tariff_value = float(night_state.state)
                         self._tariff_type = f"Night ({'Summer' if is_summer else 'Winter'})"
+                        _LOGGER.debug(f"Successfully got night tariff: {current_tariff_value}")
                     except (ValueError, TypeError):
                         _LOGGER.warning(f"Invalid night tariff value: {night_state.state}")
                         base_sensors_available = False
                 else:
-                    _LOGGER.debug(f"Night sensor {night_sensor_id} not available yet")
+                    _LOGGER.debug(f"Night sensor {night_sensor_id} not available: state={night_state.state if night_state else 'sensor not found'}")
                     base_sensors_available = False
             else:
                 day_state = self._hass.states.get(day_sensor_id)
-                if day_state and day_state.state not in ['unknown', 'unavailable', None]:
+                _LOGGER.debug(f"Day time - checking {day_sensor_id}: state={day_state.state if day_state else 'None'}, exists={day_state is not None}")
+                if day_state and day_state.state not in ['unknown', 'unavailable', None] and day_state.state is not None:
                     try:
                         current_tariff_value = float(day_state.state)
                         self._tariff_type = f"Day ({'Summer' if is_summer else 'Winter'})"
+                        _LOGGER.debug(f"Successfully got day tariff: {current_tariff_value}")
                     except (ValueError, TypeError):
                         _LOGGER.warning(f"Invalid day tariff value: {day_state.state}")
                         base_sensors_available = False
                 else:
-                    _LOGGER.debug(f"Day sensor {day_sensor_id} not available yet")
+                    _LOGGER.debug(f"Day sensor {day_sensor_id} not available: state={day_state.state if day_state else 'sensor not found'}")
                     base_sensors_available = False
             
             # Handle state assignment with fallback logic
@@ -321,22 +331,28 @@ class ElectroholdCurrentPriceSensor(SensorEntity):
             night_state = self._hass.states.get(night_sensor_id)
             
             # Handle day tariff
-            if day_state and day_state.state not in ['unknown', 'unavailable', None]:
+            if day_state and day_state.state not in ['unknown', 'unavailable', None] and day_state.state is not None:
                 try:
                     self._day_tariff = float(day_state.state)
+                    _LOGGER.debug(f"Day tariff for attributes: {self._day_tariff}")
                 except (ValueError, TypeError):
                     self._day_tariff = None
+                    _LOGGER.debug(f"Failed to convert day tariff to float: {day_state.state}")
             else:
                 self._day_tariff = None
+                _LOGGER.debug(f"Day tariff not available for attributes: {day_state.state if day_state else 'sensor not found'}")
                 
             # Handle night tariff
-            if night_state and night_state.state not in ['unknown', 'unavailable', None]:
+            if night_state and night_state.state not in ['unknown', 'unavailable', None] and night_state.state is not None:
                 try:
                     self._night_tariff = float(night_state.state)
+                    _LOGGER.debug(f"Night tariff for attributes: {self._night_tariff}")
                 except (ValueError, TypeError):
                     self._night_tariff = None
+                    _LOGGER.debug(f"Failed to convert night tariff to float: {night_state.state}")
             else:
                 self._night_tariff = None
+                _LOGGER.debug(f"Night tariff not available for attributes: {night_state.state if night_state else 'sensor not found'}")
             
             if self._state is not None:
                 _LOGGER.debug(f"Current price sensor {self._currency_type} updated: {self._state} ({self._tariff_type})")
@@ -446,14 +462,14 @@ class ElectroholdCurrentPriceSensor(SensorEntity):
             day_state = self._hass.states.get(day_sensor_id)
             night_state = self._hass.states.get(night_sensor_id)
             
-            if day_state and hasattr(day_state, 'last_updated') and day_state.state not in ['unknown', 'unavailable', None]:
+            if day_state and hasattr(day_state, 'last_updated') and day_state.state not in ['unknown', 'unavailable', None] and day_state.state is not None:
                 # Convert UTC timestamp to local timezone
                 day_local_time = day_state.last_updated.astimezone(self._timezone)
                 attributes["day_tariff_last_updated"] = day_local_time.strftime('%Y-%m-%d %H:%M:%S %Z')
             else:
                 attributes["day_tariff_last_updated"] = "Not available yet"
                 
-            if night_state and hasattr(night_state, 'last_updated') and night_state.state not in ['unknown', 'unavailable', None]:
+            if night_state and hasattr(night_state, 'last_updated') and night_state.state not in ['unknown', 'unavailable', None] and night_state.state is not None:
                 # Convert UTC timestamp to local timezone
                 night_local_time = night_state.last_updated.astimezone(self._timezone)
                 attributes["night_tariff_last_updated"] = night_local_time.strftime('%Y-%m-%d %H:%M:%S %Z')
@@ -469,7 +485,7 @@ class ElectroholdCurrentPriceSensor(SensorEntity):
             is_night = (hour >= 23 or hour < 7) if is_summer else (hour >= 22 or hour < 6)
             
             current_state = night_state if is_night else day_state
-            if current_state and hasattr(current_state, 'last_updated') and current_state.state not in ['unknown', 'unavailable', None]:
+            if current_state and hasattr(current_state, 'last_updated') and current_state.state not in ['unknown', 'unavailable', None] and current_state.state is not None:
                 current_local_time = current_state.last_updated.astimezone(self._timezone)
                 attributes["current_tariff_last_updated"] = current_local_time.strftime('%Y-%m-%d %H:%M:%S %Z')
             else:
@@ -496,7 +512,7 @@ class ElectroholdCurrentPriceSensor(SensorEntity):
         day_state = self._hass.states.get(day_sensor_id)
         night_state = self._hass.states.get(night_sensor_id)
         
-        day_available = day_state and day_state.state not in ['unknown', 'unavailable', None]
-        night_available = night_state and night_state.state not in ['unknown', 'unavailable', None]
+        day_available = day_state and day_state.state not in ['unknown', 'unavailable', None] and day_state.state is not None
+        night_available = night_state and night_state.state not in ['unknown', 'unavailable', None] and night_state.state is not None
         
         return day_available and night_available
