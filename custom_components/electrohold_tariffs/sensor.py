@@ -25,7 +25,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
 # Set the scan interval to update daily for base tariff sensors
 # Current price sensors will use a shorter interval to switch between day/night
 SCAN_INTERVAL = timedelta(days=1)
-CURRENT_PRICE_SCAN_INTERVAL = timedelta(minutes=30)
+CURRENT_PRICE_SCAN_INTERVAL = timedelta(minutes=15)
 
 def setup_platform(hass, config, add_entities, discovery_info=None):
     """Set up the electricity tariff sensors."""
@@ -38,21 +38,12 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     day_euro_sensor = ElectricityTariffSensor("day_tariff_euro", "Day Euro", "electrohold_tariff_day_euro", "EUR/kWh")
     night_euro_sensor = ElectricityTariffSensor("night_tariff_euro", "Night Euro", "electrohold_tariff_night_euro", "EUR/kWh")
     
-    # Add base sensors first
-    add_entities([day_sensor, night_sensor, day_euro_sensor, night_euro_sensor])
-    
-    # Schedule current price sensors to be added after base sensors have had time to initialize
-    def add_current_price_sensors():
-        """Add current price sensors after base sensors are available."""
-        _LOGGER.info("Setting up current price sensors after base sensors initialization")
-        
-        current_price_bgn_sensor = ElectroholdCurrentPriceSensor(hass, "bgn", "Current Price BGN", "electrohold_current_price_bgn", "BGN/kWh", timezone)
-        current_price_euro_sensor = ElectroholdCurrentPriceSensor(hass, "euro", "Current Price EURO", "electrohold_current_price_euro", "EUR/kWh", timezone)
-        
-        add_entities([current_price_bgn_sensor, current_price_euro_sensor])
-    
-    # Schedule the current price sensors to be added after a delay
-    hass.loop.call_later(30, add_current_price_sensors)
+    # Current price sensors that automatically switch between day/night based on time and season
+    current_price_bgn_sensor = ElectroholdCurrentPriceSensor(hass, "bgn", "Current Price BGN", "electrohold_current_price_bgn", "BGN/kWh", timezone)
+    current_price_euro_sensor = ElectroholdCurrentPriceSensor(hass, "euro", "Current Price EURO", "electrohold_current_price_euro", "EUR/kWh", timezone)
+
+    # Add all sensors at once - current price sensors will handle unavailable base sensors gracefully
+    add_entities([day_sensor, night_sensor, day_euro_sensor, night_euro_sensor, current_price_bgn_sensor, current_price_euro_sensor])
 
 class ElectricityTariffSensor(SensorEntity):
     """Representation of a Sensor to expose electricity tariff data."""
@@ -234,14 +225,16 @@ class ElectroholdCurrentPriceSensor(SensorEntity):
         self._season = None
         self._day_tariff = None
         self._night_tariff = None
+        self._last_valid_state = None  # Store last known good state
+        self._initialization_complete = False  # Track if we've successfully initialized once
         
         # Override scan interval for current price sensors
         self._scan_interval = CURRENT_PRICE_SCAN_INTERVAL
         
         _LOGGER.info(f"Initializing current price sensor {self._currency_type} with timezone {self._timezone}")
         
-        # Don't perform initial update immediately - wait for base sensors to be ready
-        # The update will be triggered by Home Assistant's polling mechanism
+        # Perform initial update to set up the sensor
+        self.update()
 
     def update(self):
         """Update the sensor state based on current time and season."""
@@ -275,30 +268,50 @@ class ElectroholdCurrentPriceSensor(SensorEntity):
                 night_sensor_id = "sensor.electrohold_tariff_night_euro"
             
             # Get the current tariff values from the base sensors
+            base_sensors_available = True
+            current_tariff_value = None
+            
             if is_night:
                 night_state = self._hass.states.get(night_sensor_id)
                 if night_state and night_state.state not in ['unknown', 'unavailable', None]:
                     try:
-                        self._state = float(night_state.state)
+                        current_tariff_value = float(night_state.state)
                         self._tariff_type = f"Night ({'Summer' if is_summer else 'Winter'})"
                     except (ValueError, TypeError):
                         _LOGGER.warning(f"Invalid night tariff value: {night_state.state}")
-                        self._state = None
+                        base_sensors_available = False
                 else:
                     _LOGGER.debug(f"Night sensor {night_sensor_id} not available yet")
-                    self._state = None
+                    base_sensors_available = False
             else:
                 day_state = self._hass.states.get(day_sensor_id)
                 if day_state and day_state.state not in ['unknown', 'unavailable', None]:
                     try:
-                        self._state = float(day_state.state)
+                        current_tariff_value = float(day_state.state)
                         self._tariff_type = f"Day ({'Summer' if is_summer else 'Winter'})"
                     except (ValueError, TypeError):
                         _LOGGER.warning(f"Invalid day tariff value: {day_state.state}")
-                        self._state = None
+                        base_sensors_available = False
                 else:
                     _LOGGER.debug(f"Day sensor {day_sensor_id} not available yet")
-                    self._state = None
+                    base_sensors_available = False
+            
+            # Handle state assignment with fallback logic
+            if base_sensors_available and current_tariff_value is not None:
+                # Base sensors are available, use current value
+                self._state = current_tariff_value
+                self._last_valid_state = current_tariff_value
+                self._initialization_complete = True
+                _LOGGER.debug(f"Current price sensor {self._currency_type} updated with fresh data: {self._state} ({self._tariff_type})")
+            elif self._last_valid_state is not None and self._initialization_complete:
+                # Base sensors not available, but we have a previous valid state
+                # Keep using the last known good value (this handles restart scenarios)
+                self._state = self._last_valid_state
+                _LOGGER.debug(f"Current price sensor {self._currency_type} using cached value while base sensors refresh: {self._state}")
+            else:
+                # No base sensors and no cached value - sensor is truly unavailable
+                self._state = None
+                _LOGGER.debug(f"Current price sensor {self._currency_type} waiting for base sensors to become available")
             
             # Set season attribute
             self._season = "Summer" if is_summer else "Winter"
@@ -332,7 +345,10 @@ class ElectroholdCurrentPriceSensor(SensorEntity):
             
         except Exception as e:
             _LOGGER.error(f"Error updating current price sensor {self._currency_type}: {e}")
-            # Keep the previous state if available
+            # If we have a cached value, keep using it during errors
+            if self._last_valid_state is not None and self._initialization_complete:
+                self._state = self._last_valid_state
+                _LOGGER.debug(f"Using cached value due to update error: {self._state}")
 
     @property
     def name(self):
@@ -347,7 +363,11 @@ class ElectroholdCurrentPriceSensor(SensorEntity):
     @property
     def available(self):
         """Return True if entity is available."""
-        # Check if base sensors are available
+        # If we have a current state (either fresh or cached), we're available
+        if self._state is not None:
+            return True
+            
+        # If we don't have a state, check if base sensors are available for initial setup
         if self._currency_type == "bgn":
             day_sensor_id = "sensor.electrohold_tariff_day"
             night_sensor_id = "sensor.electrohold_tariff_night"
@@ -358,11 +378,11 @@ class ElectroholdCurrentPriceSensor(SensorEntity):
         day_state = self._hass.states.get(day_sensor_id)
         night_state = self._hass.states.get(night_sensor_id)
         
-        # Both base sensors must be available and have valid data
+        # Both base sensors must be available and have valid data for initial availability
         day_available = day_state and day_state.state not in ['unknown', 'unavailable', None]
         night_available = night_state and night_state.state not in ['unknown', 'unavailable', None]
         
-        return day_available and night_available and self._state is not None
+        return day_available and night_available
 
     @property
     def unit_of_measurement(self):
@@ -396,13 +416,21 @@ class ElectroholdCurrentPriceSensor(SensorEntity):
         utc_now = dt_util.utcnow()
         local_now = utc_now.astimezone(self._timezone)
         
+        # Determine data source status
+        data_source = "fresh"  # Default assumption
+        if self._state == self._last_valid_state and not self._are_base_sensors_available():
+            data_source = "cached"
+        elif self._state is None:
+            data_source = "unavailable"
+        
         attributes = {
             "tariff_type": self._tariff_type,
             "season": self._season,
             "day_tariff": self._day_tariff,
             "night_tariff": self._night_tariff,
             "last_updated": local_now.strftime('%Y-%m-%d %H:%M:%S %Z'),
-            "timezone": str(self._timezone)
+            "timezone": str(self._timezone),
+            "data_source": data_source  # "fresh", "cached", or "unavailable"
         }
         
         # Get the appropriate sensor entity IDs based on currency type
@@ -455,3 +483,20 @@ class ElectroholdCurrentPriceSensor(SensorEntity):
             attributes["current_tariff_last_updated"] = "Error getting timestamp"
         
         return attributes
+
+    def _are_base_sensors_available(self):
+        """Check if base sensors are currently available."""
+        if self._currency_type == "bgn":
+            day_sensor_id = "sensor.electrohold_tariff_day"
+            night_sensor_id = "sensor.electrohold_tariff_night"
+        else:  # euro
+            day_sensor_id = "sensor.electrohold_tariff_day_euro"
+            night_sensor_id = "sensor.electrohold_tariff_night_euro"
+            
+        day_state = self._hass.states.get(day_sensor_id)
+        night_state = self._hass.states.get(night_sensor_id)
+        
+        day_available = day_state and day_state.state not in ['unknown', 'unavailable', None]
+        night_available = night_state and night_state.state not in ['unknown', 'unavailable', None]
+        
+        return day_available and night_available
