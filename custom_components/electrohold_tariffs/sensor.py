@@ -31,6 +31,7 @@ class ElectricityTariffSensor(SensorEntity):
         self._unique_id = unique_id
         self._state = None
         self._unit_of_measurement = unit_of_measurement
+        self._attr_should_poll = True  # Enable polling for regular updates
 
     def update(self):
         """Fetch the current value from the website and update the sensor state."""
