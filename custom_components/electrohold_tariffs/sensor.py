@@ -13,121 +13,122 @@ SCAN_INTERVAL = timedelta(days=1)
 def setup_platform(hass, config, add_entities, discovery_info=None):
     """Set up the electricity tariff sensors."""
 
-    day_sensor = ElectricityTariffSensor("day_tarrif", "day", "electrohold_day_tariff")
-    night_sensor = ElectricityTariffSensor("night_tarrif", "night", "electrohold_night_tariff")
+    day_sensor = ElectricityTariffSensor("day_tariff", "Day", "electrohold_tariff_day", "BGN/kWh")
+    night_sensor = ElectricityTariffSensor("night_tariff", "Night", "electrohold_tariff_night", "BGN/kWh")
+    day_euro_sensor = ElectricityTariffSensor("day_tariff_euro", "Day Euro", "electrohold_tariff_day_euro", "EUR/kWh")
+    night_euro_sensor = ElectricityTariffSensor("night_tariff_euro", "Night Euro", "electrohold_tariff_night_euro", "EUR/kWh")
 
-    day_sensor.update()
-    night_sensor.update()
+    # Update all sensors
+    for sensor in [day_sensor, night_sensor, day_euro_sensor, night_euro_sensor]:
+        sensor.update()
 
-    add_entities([day_sensor, night_sensor])
+    add_entities([day_sensor, night_sensor, day_euro_sensor, night_euro_sensor])
 
 class ElectricityTariffSensor(SensorEntity):
     """Representation of a Sensor to expose electricity tariff data."""
 
-    def __init__(self, sensor_type, label, unique_id):
+    def __init__(self, sensor_type, label, unique_id, unit_of_measurement):
         """Initialize the sensor."""
         self._sensor_type = sensor_type
         self._label = label
         self._unique_id = unique_id
         self._state = None
-        self._unit_of_measurement = "BGN/kWh"
+        self._unit_of_measurement = unit_of_measurement
 
     def update(self):
         """Fetch the current value from the website and update the sensor state."""
         try:
             url = "https://electrohold.bg/bg/sales/domakinstva/snabdyavane-po-regulirani-ceni/"
-            response = requests.get(url, timeout=5)
+            response = requests.get(url, timeout=10)
             response.raise_for_status()
 
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            night = None
-            day = None
+            # Parse main tariffs (Дневна/Нощна)
+            main_tariffs = self._parse_main_tariffs(soup)
 
-            value_elements = soup.find_all(string=["Дневна", "Нощна"])
+            if not main_tariffs:
+                _LOGGER.error("Failed to parse tariffs")
+                self._state = None
+                return
 
-            for element in value_elements:
-                parent_td = element.find_parent('td')
-                if not parent_td:
-                    continue
+            # Calculate final tariffs based on sensor type (final prices already include network services, just add VAT)
+            if self._sensor_type == "day_tariff":
+                # BGN day tariff: Дневна BGN * 1.2 (add VAT)
+                day_bgn = main_tariffs.get('day_bgn', 0)
+                self._state = round(day_bgn * 1.2, 5)
 
-                next_td = parent_td.find_next_sibling('td')
-                if not next_td:
-                    continue
+            elif self._sensor_type == "night_tariff":
+                # BGN night tariff: Нощна BGN * 1.2 (add VAT)
+                night_bgn = main_tariffs.get('night_bgn', 0)
+                self._state = round(night_bgn * 1.2, 5)
 
-                value_text = next_td.text.strip().replace(',', '.')
-                # Extract numeric part only
-                import re
-                value_number = re.findall(r"[\d.]+", value_text)
-                if not value_number:
-                    _LOGGER.error(f"Could not extract numeric value from: {value_text}")
-                    continue
+            elif self._sensor_type == "day_tariff_euro":
+                # EUR day tariff: Дневна EUR * 1.2 (add VAT)
+                day_eur = main_tariffs.get('day_eur', 0)
+                self._state = round(day_eur * 1.2, 5)
 
-                numeric_value = float(value_number[0])
-
-                if "Дневна" in element.strip():
-                    day = numeric_value
-                elif "Нощна" in element.strip():
-                    night = numeric_value
-
-            # Apply your markup and rounding
-            day_tariff = round((day + 0.06424) * 1.2, 5) if day is not None else None
-            night_tariff = round((night + 0.06424) * 1.2, 5) if night is not None else None
-
-            if self._sensor_type == "day_tarrif":
-                self._state = day_tariff
-            elif self._sensor_type == "night_tarrif":
-                self._state = night_tariff
+            elif self._sensor_type == "night_tariff_euro":
+                # EUR night tariff: Нощна EUR * 1.2 (add VAT)
+                night_eur = main_tariffs.get('night_eur', 0)
+                self._state = round(night_eur * 1.2, 5)
 
         except Exception as e:
             _LOGGER.error(f"Error fetching electricity tariff data: {e}")
             self._state = None
 
+    def _parse_main_tariffs(self, soup):
+        """Parse the main tariffs (Дневна/Нощна) from the webpage."""
+        tariffs = {}
 
-    # def update(self):
-    #     """Fetch the current value from the website and update the sensor state."""
-    #     try:
-    #         url = "https://electrohold.bg/bg/sales/domakinstva/snabdyavane-po-regulirani-ceni/"
-    #         response = requests.get(url, timeout=5)
-    #         response.raise_for_status()
+        try:
+            # Find all table rows
+            rows = soup.find_all('tr')
 
-    #         soup = BeautifulSoup(response.text, 'html.parser')
+            for row in rows:
+                cells = row.find_all('td')
+                if len(cells) >= 6:  # Need at least 6 columns for the final prices
+                    # Check if this row contains Дневна or Нощна
+                    first_cell_text = cells[1].get_text(strip=True) if len(cells) > 1 else ""
 
-    #         night = None
-    #         day = None
+                    if "Дневна" in first_cell_text:
+                        # Extract the final prices (Крайни цени) which are in columns 4 and 5
+                        # Column 4: BGN final price, Column 5: EUR final price
+                        bgn_text = cells[4].get_text(strip=True) if len(cells) > 4 else ""
+                        eur_text = cells[5].get_text(strip=True) if len(cells) > 5 else ""
 
-    #         value_elements = soup.find_all(string=["Дневна", "Нощна"])
+                        tariffs['day_bgn'] = self._extract_numeric_value(bgn_text)
+                        tariffs['day_eur'] = self._extract_numeric_value(eur_text)
 
-    #         for element in value_elements:
-    #             if "Дневна" in element.strip():
-    #                 next_element = element.find_parent('td').find_next_sibling('td')
-    #                 if next_element:
-    #                     day_value = next_element.text.strip().replace(',', '.')
-    #                     try:
-    #                         day = float(day_value)
-    #                     except ValueError:
-    #                         _LOGGER.error(f"Error converting day value: {day_value}")
+                    elif "Нощна" in first_cell_text:
+                        # Extract the final prices (Крайни цени) which are in columns 4 and 5
+                        bgn_text = cells[4].get_text(strip=True) if len(cells) > 4 else ""
+                        eur_text = cells[5].get_text(strip=True) if len(cells) > 5 else ""
 
-    #             if "Нощна" in element.strip():
-    #                 next_element = element.find_parent('td').find_next_sibling('td')
-    #                 if next_element:
-    #                     night_value = next_element.text.strip().replace(',', '.')
-    #                     try:
-    #                         night = float(night_value)
-    #                     except ValueError:
-    #                         _LOGGER.error(f"Error converting night value: {night_value}")
+                        tariffs['night_bgn'] = self._extract_numeric_value(bgn_text)
+                        tariffs['night_eur'] = self._extract_numeric_value(eur_text)
 
-    #         day_tarrif = round((day + 0.06424) * 1.2, 5) if day is not None else None
-    #         night_tarrif = round((night + 0.06424) * 1.2, 5) if night is not None else None
+            _LOGGER.debug(f"Parsed main tariffs: {tariffs}")
+            return tariffs
 
-    #         if self._sensor_type == "day_tarrif":
-    #             self._state = day_tarrif
-    #         elif self._sensor_type == "night_tarrif":
-    #             self._state = night_tarrif
+        except Exception as e:
+            _LOGGER.error(f"Error parsing main tariffs: {e}")
+            return {}
 
-    #     except Exception as e:
-    #         _LOGGER.error(f"Error fetching electricity tariff data: {e}")
-    #         self._state = None
+    def _extract_numeric_value(self, text):
+        """Extract numeric value from text."""
+        try:
+            import re
+            # Replace comma with dot for decimal separator
+            text = text.replace(',', '.')
+            # Extract numeric part (including decimal)
+            match = re.search(r'(\d+(?:\.\d+)?)', text)
+            if match:
+                return float(match.group(1))
+            return None
+        except Exception as e:
+            _LOGGER.error(f"Error extracting numeric value from '{text}': {e}")
+            return None
 
     @property
     def name(self):
