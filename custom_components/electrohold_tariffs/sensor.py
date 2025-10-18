@@ -8,6 +8,8 @@ from homeassistant.const import CONF_NAME, CONF_UNIT_OF_MEASUREMENT
 
 _LOGGER = logging.getLogger(__name__)
 
+# Set to 5 minutes for initial testing, change back to timedelta(days=1) after first successful update
+# Set the scan interval to update daily
 SCAN_INTERVAL = timedelta(days=1)
 
 def setup_platform(hass, config, add_entities, discovery_info=None):
@@ -32,21 +34,29 @@ class ElectricityTariffSensor(SensorEntity):
         self._state = None
         self._unit_of_measurement = unit_of_measurement
         self._attr_should_poll = True  # Enable polling for regular updates
+        
+        # Perform initial update to get data immediately
+        _LOGGER.info(f"Initializing sensor {self._sensor_type}, performing initial update")
+        self.update()
 
     def update(self):
         """Fetch the current value from the website and update the sensor state."""
+        _LOGGER.info(f"Starting update for sensor {self._sensor_type}")
         try:
             url = "https://electrohold.bg/bg/sales/domakinstva/snabdyavane-po-regulirani-ceni/"
+            _LOGGER.info(f"Fetching data from: {url}")
             response = requests.get(url, timeout=10)
             response.raise_for_status()
+            _LOGGER.info(f"Successfully fetched webpage, status code: {response.status_code}")
 
             soup = BeautifulSoup(response.text, 'html.parser')
 
             # Parse main tariffs (Дневна/Нощна)
             main_tariffs = self._parse_main_tariffs(soup)
+            _LOGGER.info(f"Parsed tariffs: {main_tariffs}")
 
             if not main_tariffs:
-                _LOGGER.error("Failed to parse tariffs")
+                _LOGGER.error("Failed to parse tariffs - no data found")
                 self._state = None
                 return
 
@@ -55,24 +65,30 @@ class ElectricityTariffSensor(SensorEntity):
                 # BGN day tariff: Дневна BGN * 1.2 (add VAT)
                 day_bgn = main_tariffs.get('day_bgn', 0)
                 self._state = round(day_bgn * 1.2, 5)
+                _LOGGER.info(f"Day BGN tariff calculated: {day_bgn} * 1.2 = {self._state}")
 
             elif self._sensor_type == "night_tariff":
                 # BGN night tariff: Нощна BGN * 1.2 (add VAT)
                 night_bgn = main_tariffs.get('night_bgn', 0)
                 self._state = round(night_bgn * 1.2, 5)
+                _LOGGER.info(f"Night BGN tariff calculated: {night_bgn} * 1.2 = {self._state}")
 
             elif self._sensor_type == "day_tariff_euro":
                 # EUR day tariff: Дневна EUR * 1.2 (add VAT)
                 day_eur = main_tariffs.get('day_eur', 0)
                 self._state = round(day_eur * 1.2, 5)
+                _LOGGER.info(f"Day EUR tariff calculated: {day_eur} * 1.2 = {self._state}")
 
             elif self._sensor_type == "night_tariff_euro":
                 # EUR night tariff: Нощна EUR * 1.2 (add VAT)
                 night_eur = main_tariffs.get('night_eur', 0)
                 self._state = round(night_eur * 1.2, 5)
+                _LOGGER.info(f"Night EUR tariff calculated: {night_eur} * 1.2 = {self._state}")
+
+            _LOGGER.info(f"Update completed successfully for {self._sensor_type}, final state: {self._state}")
 
         except Exception as e:
-            _LOGGER.error(f"Error fetching electricity tariff data: {e}")
+            _LOGGER.error(f"Error fetching electricity tariff data for {self._sensor_type}: {e}")
             # Keep the previous state if available, otherwise set to None
             if self._state is None:
                 self._state = None  # This will make the entity unavailable
