@@ -154,3 +154,8 @@ class ElectricityTariffSensor(SensorEntity):
     def unique_id(self):
         """Return a unique ID for the sensor."""
         return self._unique_id
+
+    @property
+    def entity_id(self):
+        """Return the entity ID for the sensor."""
+        return f"sensor.{self._unique_id}"
