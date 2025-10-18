@@ -18,10 +18,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     day_euro_sensor = ElectricityTariffSensor("day_tariff_euro", "Day Euro", "electrohold_tariff_day_euro", "EUR/kWh")
     night_euro_sensor = ElectricityTariffSensor("night_tariff_euro", "Night Euro", "electrohold_tariff_night_euro", "EUR/kWh")
 
-    # Update all sensors
-    for sensor in [day_sensor, night_sensor, day_euro_sensor, night_euro_sensor]:
-        sensor.update()
-
+    # Don't update during setup - let Home Assistant handle the update cycle
     add_entities([day_sensor, night_sensor, day_euro_sensor, night_euro_sensor])
 
 class ElectricityTariffSensor(SensorEntity):
@@ -75,7 +72,10 @@ class ElectricityTariffSensor(SensorEntity):
 
         except Exception as e:
             _LOGGER.error(f"Error fetching electricity tariff data: {e}")
-            self._state = None
+            # Keep the previous state if available, otherwise set to None
+            if self._state is None:
+                self._state = None  # This will make the entity unavailable
+            # Don't change _state if we already have a valid value from previous update
 
     def _parse_main_tariffs(self, soup):
         """Parse the main tariffs (Дневна/Нощна) from the webpage."""
@@ -139,6 +139,11 @@ class ElectricityTariffSensor(SensorEntity):
     def state(self):
         """Return the state of the sensor."""
         return self._state
+    
+    @property
+    def available(self):
+        """Return True if entity is available."""
+        return self._state is not None
 
     @property
     def unit_of_measurement(self):
@@ -154,8 +159,3 @@ class ElectricityTariffSensor(SensorEntity):
     def unique_id(self):
         """Return a unique ID for the sensor."""
         return self._unique_id
-
-    @property
-    def entity_id(self):
-        """Return the entity ID for the sensor."""
-        return f"sensor.{self._unique_id}"
