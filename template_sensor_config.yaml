@@ -1,0 +1,51 @@
+# Add this to your configuration.yaml or create as a Template Helper in Home Assistant UI
+
+template:
+  - sensor:
+      - name: "Electrohold Current Price"
+        unique_id: electrohold_current_price_auto
+        unit_of_measurement: "EUR/kWh"
+        device_class: monetary
+        state: >
+          {% set hour = now().hour %}
+          {% set month = now().month %}
+          {% set is_summer = month >= 4 and month <= 10 %}
+          {% if is_summer %}
+            {# Summer: Night rate 23:00-07:00 #}
+            {% if hour >= 23 or hour < 7 %}
+              {{ states('sensor.electrohold_tariff_night_euro') }}
+            {% else %}
+              {{ states('sensor.electrohold_tariff_day_euro') }}
+            {% endif %}
+          {% else %}
+            {# Winter: Night rate 22:00-06:00 #}
+            {% if hour >= 22 or hour < 6 %}
+              {{ states('sensor.electrohold_tariff_night_euro') }}
+            {% else %}
+              {{ states('sensor.electrohold_tariff_day_euro') }}
+            {% endif %}
+          {% endif %}
+        attributes:
+          tariff_type: >
+            {% set hour = now().hour %}
+            {% set month = now().month %}
+            {% set is_summer = month >= 4 and month <= 10 %}
+            {% if is_summer %}
+              {% if hour >= 23 or hour < 7 %}
+                Night (Summer)
+              {% else %}
+                Day (Summer)
+              {% endif %}
+            {% else %}
+              {% if hour >= 22 or hour < 6 %}
+                Night (Winter)
+              {% else %}
+                Day (Winter)
+              {% endif %}
+            {% endif %}
+          season: >
+            {% set month = now().month %}
+            {% if month >= 4 and month <= 10 %}Summer{% else %}Winter{% endif %}
+          day_tariff: "{{ states('sensor.electrohold_tariff_day_euro') }}"
+          night_tariff: "{{ states('sensor.electrohold_tariff_night_euro') }}"
+          friendly_name: "Electrohold Current Electricity Price"
