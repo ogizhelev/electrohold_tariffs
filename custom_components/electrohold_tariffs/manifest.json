@@ -3,8 +3,9 @@
     "name": "Electrohold Tariffs",
     "homeassistant": "2025.1.4",
     "documentation": "https://github.com/ogizhelev/electrohold_tariffs",
-    "requirements": ["requests", "beautifulsoup4", "pytz"],
+    "requirements": ["requests", "beautifulsoup4"],
     "dependencies": [],
     "codeowners": ["@ogizhelev"],
-    "version": "1.0.0"
+    "version": "1.0.1",
+    "integration_type": "device"
 }
