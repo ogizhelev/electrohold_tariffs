@@ -73,29 +73,18 @@ class ElectricityTariffSensor(SensorEntity):
 
             # Calculate final tariffs based on sensor type
             if self._sensor_type == "day_tariff_euro":
-                # Day EUR tariff: Sum all components and apply VAT
-                # Components: base_day + fee1 + fee2 + fee3 + fee4
+                # Day EUR tariff: Base price already includes all network fees, just apply 20% VAT
                 base_day = tariff_data.get('day_base', 0)
-                fee1 = tariff_data.get('fee1', 0)  # 0,0076 €/кВтч
-                fee2 = tariff_data.get('fee2', 0)  # 0,00018 €/кВтч
-                fee3 = tariff_data.get('fee3', 0)  # 0,02374 €/кВтч
-                fee4 = tariff_data.get('fee4', 0)  # 0,00371 €/кВтч
                 
-                total_before_vat = base_day + fee1 + fee2 + fee3 + fee4
-                self._state = round(total_before_vat * 1.2, 5)
-                _LOGGER.info(f"Day EUR tariff calculated: ({base_day} + {fee1} + {fee2} + {fee3} + {fee4}) * 1.2 = {self._state}")
+                self._state = round(base_day * 1.2, 6)  # Apply 20% VAT
+                _LOGGER.info(f"Day EUR tariff calculated: {base_day} * 1.2 = {self._state}")
 
             elif self._sensor_type == "night_tariff_euro":
-                # Night EUR tariff: Sum all components and apply VAT
-                base_night = tariff_data.get('night_base', 0)  # 0,07381 €/кВтч
-                fee1 = tariff_data.get('fee1', 0)
-                fee2 = tariff_data.get('fee2', 0)
-                fee3 = tariff_data.get('fee3', 0)
-                fee4 = tariff_data.get('fee4', 0)
+                # Night EUR tariff: Base price already includes all network fees, just apply 20% VAT
+                base_night = tariff_data.get('night_base', 0)
                 
-                total_before_vat = base_night + fee1 + fee2 + fee3 + fee4
-                self._state = round(total_before_vat * 1.2, 5)
-                _LOGGER.info(f"Night EUR tariff calculated: ({base_night} + {fee1} + {fee2} + {fee3} + {fee4}) * 1.2 = {self._state}")
+                self._state = round(base_night * 1.2, 6)  # Apply 20% VAT
+                _LOGGER.info(f"Night EUR tariff calculated: {base_night} * 1.2 = {self._state}")
 
             _LOGGER.info(f"Update completed successfully for {self._sensor_type}, final state: {self._state}")
 
@@ -107,66 +96,72 @@ class ElectricityTariffSensor(SensorEntity):
             # Don't change _state if we already have a valid value from previous update
 
     def _parse_tariff_components(self, soup):
-        """Parse the tariff components from the webpage."""
+        """Parse the tariff components from the webpage dynamically."""
         components = {}
 
         try:
-            # Find all table cells
-            all_text = soup.get_text()
-            
-            # Target values to search for (with both comma and dot variations)
-            # Map fee keys to human-readable descriptions
-            target_values = {
-                'fee1': {
-                    'values': ['0,0076', '0.0076'],
-                    'description': 'Public Service Obligation (PSO)'
-                },
-                'fee2': {
-                    'values': ['0,00018', '0.00018'],
-                    'description': 'Energy Security Fund'
-                },
-                'fee3': {
-                    'values': ['0,02374', '0.02374'],
-                    'description': 'Network Access Fee'
-                },
-                'fee4': {
-                    'values': ['0,00371', '0.00371'],
-                    'description': 'Excise Duty'
-                },
-                'day_base': {
-                    'values': ['0,12478', '0.12478'],
-                    'description': 'Day Base Tariff (Energy + Supply)'
-                },
-                'night_base': {
-                    'values': ['0,07381', '0.07381'],
-                    'description': 'Night Base Tariff (Energy + Supply)'
-                }
-            }
+            import re
             
             _LOGGER.info("Starting to parse tariff components from webpage...")
             
-            # Extract each component by searching for the specific values in Euro
-            for key, config in target_values.items():
-                found = False
-                for value_str in config['values']:
-                    if value_str in all_text:
-                        # Convert to float (replace comma with dot)
-                        numeric_value = float(value_str.replace(',', '.'))
-                        components[key] = numeric_value
-                        _LOGGER.info(f"✓ Found {config['description']}: {numeric_value} €/kWh (key: {key})")
-                        found = True
-                        break
-                
-                if not found:
-                    _LOGGER.warning(f"✗ Could not find {config['description']} (key: {key}) - setting to 0")
-                    components[key] = 0
-
-            _LOGGER.info(f"Tariff parsing complete. Total components found: {len([v for v in components.values() if v > 0])}/{len(target_values)}")
-            _LOGGER.debug(f"All parsed components: {components}")
+            # Find all table rows to extract prices
+            tables = soup.find_all('table')
+            _LOGGER.info(f"Found {len(tables)} tables on the page")
+            
+            # Parse main tariff table (day/night prices)
+            for table in tables:
+                rows = table.find_all('tr')
+                for row in rows:
+                    cells = row.find_all(['td', 'th'])
+                    cell_texts = [cell.get_text(strip=True) for cell in cells]
+                    
+                    # Look for day tariff row (contains "Дневна")
+                    if any('Дневна' in text for text in cell_texts):
+                        _LOGGER.info(f"Found day tariff row: {cell_texts}")
+                        # Extract the Euro value from the appropriate column
+                        for text in cell_texts:
+                            # Match pattern like "0,12478 €/кВтч" or "0.12478"
+                            match = re.search(r'(\d+[,\.]\d+)\s*€', text)
+                            if match:
+                                value_str = match.group(1).replace(',', '.')
+                                value = float(value_str)
+                                # The 4th column should be the final price with all network fees included (without VAT)
+                                if value > 0.1:  # Day price should be > 0.1
+                                    components['day_base'] = value
+                                    _LOGGER.info(f"✓ Found Day Base Tariff (with all fees, before VAT): {value} €/kWh")
+                                    break
+                    
+                    # Look for night tariff row (contains "Нощна")
+                    elif any('Нощна' in text for text in cell_texts):
+                        _LOGGER.info(f"Found night tariff row: {cell_texts}")
+                        for text in cell_texts:
+                            match = re.search(r'(\d+[,\.]\d+)\s*€', text)
+                            if match:
+                                value_str = match.group(1).replace(',', '.')
+                                value = float(value_str)
+                                # Night price should be between 0.05 and 0.1
+                                if 0.05 < value < 0.1:
+                                    components['night_base'] = value
+                                    _LOGGER.info(f"✓ Found Night Base Tariff (with all fees, before VAT): {value} €/kWh")
+                                    break
+            
+            # Verify required components were found
+            expected_keys = ['day_base', 'night_base']
+            missing_keys = [key for key in expected_keys if key not in components or components[key] == 0]
+            
+            if missing_keys:
+                _LOGGER.warning(f"Could not find some components: {missing_keys}")
+                # Set missing components to 0
+                for key in missing_keys:
+                    if key not in components:
+                        components[key] = 0
+            
+            _LOGGER.info(f"Tariff parsing complete. Components found: {len([v for v in components.values() if v > 0])}/{len(expected_keys)}")
+            _LOGGER.info(f"All parsed components: {components}")
             return components
 
         except Exception as e:
-            _LOGGER.error(f"Error parsing tariff components: {e}")
+            _LOGGER.error(f"Error parsing tariff components: {e}", exc_info=True)
             return {}
 
     def _extract_numeric_value(self, text):
