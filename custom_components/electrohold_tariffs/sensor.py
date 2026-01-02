@@ -1,215 +1,269 @@
-# /config/custom_components/electrohold_tariffs/sensor.py
+"""Electrohold tariff sensor platform for Home Assistant."""
+from __future__ import annotations
+
 import logging
+import re
+from datetime import timedelta
+from typing import Final
+
 import requests
 from bs4 import BeautifulSoup
-from datetime import timedelta
 import voluptuous as vol
-from homeassistant.components.sensor import SensorEntity, PLATFORM_SCHEMA
-import homeassistant.helpers.config_validation as cv
+from homeassistant.components.sensor import PLATFORM_SCHEMA, SensorEntity
+from homeassistant.const import CURRENCY_EURO
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.config_validation import string
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
-_LOGGER = logging.getLogger(__name__)
+_LOGGER: Final = logging.getLogger(__name__)
 
 # Configuration constants
-CONF_TIMEZONE = "timezone"
-DEFAULT_TIMEZONE = "Europe/Sofia"
+CONF_TIMEZONE: Final = "timezone"
+DEFAULT_TIMEZONE: Final = "Europe/Sofia"
+
+# Electrohold website URL
+ELECTROHOLD_URL: Final = "https://electrohold.bg/bg/sales/domakinstva/snabdyavane-po-regulirani-ceni/"
+
+# VAT rate (20%)
+VAT_RATE: Final = 1.2
+
+# Sensor types
+SENSOR_TYPE_DAY: Final = "day_tariff_euro"
+SENSOR_TYPE_NIGHT: Final = "night_tariff_euro"
 
 # Configuration schema
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Optional(CONF_TIMEZONE, default=DEFAULT_TIMEZONE): cv.string,
+    vol.Optional(CONF_TIMEZONE, default=DEFAULT_TIMEZONE): string,
 })
 
 # Set the scan interval to update daily
-SCAN_INTERVAL = timedelta(days=1)
+SCAN_INTERVAL: Final = timedelta(days=1)
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
+
+def setup_platform(
+    hass: HomeAssistant,
+    config: ConfigType,
+    add_entities: AddEntitiesCallback,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> None:
     """Set up the electricity tariff sensors."""
-
-    # Get timezone configuration, default to Europe/Sofia (Bulgaria)
-    timezone = config.get(CONF_TIMEZONE, DEFAULT_TIMEZONE)
-    
-    # Create only 2 Euro sensors (day and night electricity price)
-    day_euro_sensor = ElectricityTariffSensor("day_tariff_euro", "Day Euro", "electrohold_tariff_day_euro", "EUR/kWh")
-    night_euro_sensor = ElectricityTariffSensor("night_tariff_euro", "Night Euro", "electrohold_tariff_night_euro", "EUR/kWh")
+    # Create day and night Euro sensors
+    day_euro_sensor = ElectricityTariffSensor(
+        sensor_type=SENSOR_TYPE_DAY,
+        label="Day Euro",
+        unique_id="electrohold_tariff_day_euro",
+        unit_of_measurement=f"{CURRENCY_EURO}/kWh",
+    )
+    night_euro_sensor = ElectricityTariffSensor(
+        sensor_type=SENSOR_TYPE_NIGHT,
+        label="Night Euro",
+        unique_id="electrohold_tariff_night_euro",
+        unit_of_measurement=f"{CURRENCY_EURO}/kWh",
+    )
 
     # Add sensors
-    add_entities([day_euro_sensor, night_euro_sensor])
+    add_entities([day_euro_sensor, night_euro_sensor], True)
+
+
+
 
 class ElectricityTariffSensor(SensorEntity):
     """Representation of a Sensor to expose electricity tariff data."""
 
-    def __init__(self, sensor_type, label, unique_id, unit_of_measurement):
+    def __init__(
+        self,
+        sensor_type: str,
+        label: str,
+        unique_id: str,
+        unit_of_measurement: str,
+    ) -> None:
         """Initialize the sensor."""
         self._sensor_type = sensor_type
         self._label = label
-        self._unique_id = unique_id
-        self._state = None
-        self._unit_of_measurement = unit_of_measurement
-        self._attr_should_poll = True  # Enable polling for regular updates
+        self._attr_unique_id = unique_id
+        self._attr_state = None
+        self._attr_native_unit_of_measurement = unit_of_measurement
+        self._attr_should_poll = True
+        self._attr_device_class = "monetary"
         
-        # Perform initial update to get data immediately
-        _LOGGER.info(f"Initializing sensor {self._sensor_type}, performing initial update")
-        self.update()
+        _LOGGER.info(
+            "Initializing sensor %s, performing initial update",
+            self._sensor_type,
+        )
 
-    def update(self):
+    def update(self) -> None:
         """Fetch the current value from the website and update the sensor state."""
-        _LOGGER.info(f"Starting update for sensor {self._sensor_type}")
+        _LOGGER.info("Starting update for sensor %s", self._sensor_type)
+        
         try:
-            url = "https://electrohold.bg/bg/sales/domakinstva/snabdyavane-po-regulirani-ceni/"
-            _LOGGER.info(f"Fetching data from: {url}")
-            response = requests.get(url, timeout=10)
+            _LOGGER.info("Fetching data from: %s", ELECTROHOLD_URL)
+            response = requests.get(ELECTROHOLD_URL, timeout=10)
             response.raise_for_status()
-            _LOGGER.info(f"Successfully fetched webpage, status code: {response.status_code}")
+            _LOGGER.info(
+                "Successfully fetched webpage, status code: %d",
+                response.status_code,
+            )
 
-            soup = BeautifulSoup(response.text, 'html.parser')
+            soup = BeautifulSoup(response.text, "html.parser")
 
             # Parse tariff components from the webpage
             tariff_data = self._parse_tariff_components(soup)
-            _LOGGER.info(f"Parsed tariff components: {tariff_data}")
+            _LOGGER.info("Parsed tariff components: %s", tariff_data)
 
             if not tariff_data:
                 _LOGGER.error("Failed to parse tariff components - no data found")
-                self._state = None
+                self._attr_state = None
                 return
 
             # Calculate final tariffs based on sensor type
-            if self._sensor_type == "day_tariff_euro":
-                # Day EUR tariff: Sum all components and apply VAT
-                # Components: base_day + fee1 + fee2 + fee3 + fee4
-                base_day = tariff_data.get('day_base', 0)
-                fee1 = tariff_data.get('fee1', 0)  # 0,0076 €/кВтч
-                fee2 = tariff_data.get('fee2', 0)  # 0,00018 €/кВтч
-                fee3 = tariff_data.get('fee3', 0)  # 0,02374 €/кВтч
-                fee4 = tariff_data.get('fee4', 0)  # 0,00371 €/кВтч
-                
-                total_before_vat = base_day + fee1 + fee2 + fee3 + fee4
-                self._state = round(total_before_vat * 1.2, 5)
-                _LOGGER.info(f"Day EUR tariff calculated: ({base_day} + {fee1} + {fee2} + {fee3} + {fee4}) * 1.2 = {self._state}")
+            if self._sensor_type == SENSOR_TYPE_DAY:
+                base_day = tariff_data.get("day_base", 0)
+                self._attr_state = round(base_day * VAT_RATE, 6)
+                _LOGGER.info(
+                    "Day EUR tariff calculated: %s * %s = %s",
+                    base_day,
+                    VAT_RATE,
+                    self._attr_state,
+                )
+            elif self._sensor_type == SENSOR_TYPE_NIGHT:
+                base_night = tariff_data.get("night_base", 0)
+                self._attr_state = round(base_night * VAT_RATE, 6)
+                _LOGGER.info(
+                    "Night EUR tariff calculated: %s * %s = %s",
+                    base_night,
+                    VAT_RATE,
+                    self._attr_state,
+                )
 
-            elif self._sensor_type == "night_tariff_euro":
-                # Night EUR tariff: Sum all components and apply VAT
-                base_night = tariff_data.get('night_base', 0)  # 0,07381 €/кВтч
-                fee1 = tariff_data.get('fee1', 0)
-                fee2 = tariff_data.get('fee2', 0)
-                fee3 = tariff_data.get('fee3', 0)
-                fee4 = tariff_data.get('fee4', 0)
-                
-                total_before_vat = base_night + fee1 + fee2 + fee3 + fee4
-                self._state = round(total_before_vat * 1.2, 5)
-                _LOGGER.info(f"Night EUR tariff calculated: ({base_night} + {fee1} + {fee2} + {fee3} + {fee4}) * 1.2 = {self._state}")
+            _LOGGER.info(
+                "Update completed successfully for %s, final state: %s",
+                self._sensor_type,
+                self._attr_state,
+            )
 
-            _LOGGER.info(f"Update completed successfully for {self._sensor_type}, final state: {self._state}")
+        except requests.RequestException as exc:
+            _LOGGER.error(
+                "Error fetching electricity tariff data for %s: %s",
+                self._sensor_type,
+                exc,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            _LOGGER.error(
+                "Unexpected error updating %s: %s",
+                self._sensor_type,
+                exc,
+                exc_info=True,
+            )
 
-        except Exception as e:
-            _LOGGER.error(f"Error fetching electricity tariff data for {self._sensor_type}: {e}")
-            # Keep the previous state if available, otherwise set to None
-            if self._state is None:
-                self._state = None  # This will make the entity unavailable
-            # Don't change _state if we already have a valid value from previous update
-
-    def _parse_tariff_components(self, soup):
-        """Parse the tariff components from the webpage."""
-        components = {}
+    def _parse_tariff_components(self, soup: BeautifulSoup) -> dict[str, float]:
+        """Parse the tariff components from the webpage dynamically."""
+        components: dict[str, float] = {}
 
         try:
-            # Find all table cells
-            all_text = soup.get_text()
-            
-            # Target values to search for (with both comma and dot variations)
-            # Map fee keys to human-readable descriptions
-            target_values = {
-                'fee1': {
-                    'values': ['0,0076', '0.0076'],
-                    'description': 'Public Service Obligation (PSO)'
-                },
-                'fee2': {
-                    'values': ['0,00018', '0.00018'],
-                    'description': 'Energy Security Fund'
-                },
-                'fee3': {
-                    'values': ['0,02374', '0.02374'],
-                    'description': 'Network Access Fee'
-                },
-                'fee4': {
-                    'values': ['0,00371', '0.00371'],
-                    'description': 'Excise Duty'
-                },
-                'day_base': {
-                    'values': ['0,12478', '0.12478'],
-                    'description': 'Day Base Tariff (Energy + Supply)'
-                },
-                'night_base': {
-                    'values': ['0,07381', '0.07381'],
-                    'description': 'Night Base Tariff (Energy + Supply)'
-                }
-            }
-            
             _LOGGER.info("Starting to parse tariff components from webpage...")
             
-            # Extract each component by searching for the specific values in Euro
-            for key, config in target_values.items():
-                found = False
-                for value_str in config['values']:
-                    if value_str in all_text:
-                        # Convert to float (replace comma with dot)
-                        numeric_value = float(value_str.replace(',', '.'))
-                        components[key] = numeric_value
-                        _LOGGER.info(f"✓ Found {config['description']}: {numeric_value} €/kWh (key: {key})")
-                        found = True
-                        break
-                
-                if not found:
-                    _LOGGER.warning(f"✗ Could not find {config['description']} (key: {key}) - setting to 0")
-                    components[key] = 0
-
-            _LOGGER.info(f"Tariff parsing complete. Total components found: {len([v for v in components.values() if v > 0])}/{len(target_values)}")
-            _LOGGER.debug(f"All parsed components: {components}")
+            # Find all table rows to extract prices
+            tables = soup.find_all("table")
+            _LOGGER.info("Found %d tables on the page", len(tables))
+            
+            # Parse main tariff table (day/night prices)
+            for table in tables:
+                rows = table.find_all("tr")
+                for row in rows:
+                    cells = row.find_all(["td", "th"])
+                    cell_texts = [cell.get_text(strip=True) for cell in cells]
+                    
+                    # Look for day tariff row (contains "Дневна")
+                    if any("Дневна" in text for text in cell_texts):
+                        _LOGGER.info("Found day tariff row: %s", cell_texts)
+                        value = self._extract_euro_value(cell_texts, min_value=0.1)
+                        if value:
+                            components["day_base"] = value
+                            _LOGGER.info(
+                                "✓ Found Day Base Tariff (with all fees, before VAT): %s €/kWh",
+                                value,
+                            )
+                    
+                    # Look for night tariff row (contains "Нощна")
+                    elif any("Нощна" in text for text in cell_texts):
+                        _LOGGER.info("Found night tariff row: %s", cell_texts)
+                        value = self._extract_euro_value(
+                            cell_texts, min_value=0.05, max_value=0.1
+                        )
+                        if value:
+                            components["night_base"] = value
+                            _LOGGER.info(
+                                "✓ Found Night Base Tariff (with all fees, before VAT): %s €/kWh",
+                                value,
+                            )
+            
+            # Verify required components were found
+            expected_keys = ["day_base", "night_base"]
+            missing_keys = [
+                key for key in expected_keys
+                if key not in components or components[key] == 0
+            ]
+            
+            if missing_keys:
+                _LOGGER.warning("Could not find some components: %s", missing_keys)
+                # Set missing components to 0
+                for key in missing_keys:
+                    if key not in components:
+                        components[key] = 0
+            
+            found_count = len([v for v in components.values() if v > 0])
+            _LOGGER.info(
+                "Tariff parsing complete. Components found: %d/%d",
+                found_count,
+                len(expected_keys),
+            )
+            _LOGGER.info("All parsed components: %s", components)
             return components
 
-        except Exception as e:
-            _LOGGER.error(f"Error parsing tariff components: {e}")
+        except Exception as exc:  # pylint: disable=broad-except
+            _LOGGER.error(
+                "Error parsing tariff components: %s",
+                exc,
+                exc_info=True,
+            )
             return {}
 
-    def _extract_numeric_value(self, text):
-        """Extract numeric value from text."""
-        try:
-            import re
-            # Replace comma with dot for decimal separator
-            text = text.replace(',', '.')
-            # Extract numeric part (including decimal)
-            match = re.search(r'(\d+(?:\.\d+)?)', text)
+    def _extract_euro_value(
+        self,
+        cell_texts: list[str],
+        min_value: float = 0.0,
+        max_value: float | None = None,
+    ) -> float | None:
+        """Extract Euro value from cell texts with optional range validation."""
+        for text in cell_texts:
+            # Match pattern like "0,12478 €/кВтч" or "0.12478"
+            match = re.search(r"(\d+[,\.]\d+)\s*€", text)
             if match:
-                return float(match.group(1))
-            return None
-        except Exception as e:
-            _LOGGER.error(f"Error extracting numeric value from '{text}': {e}")
-            return None
+                value_str = match.group(1).replace(",", ".")
+                value = float(value_str)
+                
+                # Apply range validation
+                if value < min_value:
+                    continue
+                if max_value is not None and value > max_value:
+                    continue
+                    
+                return value
+        return None
 
     @property
-    def name(self):
+    def name(self) -> str:
         """Return the name of the sensor."""
         return f"Electrohold Tariff {self._label}"
 
     @property
-    def state(self):
+    def state(self) -> float | None:
         """Return the state of the sensor."""
-        return self._state
+        return self._attr_state
     
     @property
-    def available(self):
+    def available(self) -> bool:
         """Return True if entity is available."""
-        return self._state is not None
+        return self._attr_state is not None
 
-    @property
-    def unit_of_measurement(self):
-        """Return the unit of measurement."""
-        return self._unit_of_measurement
-
-    @property
-    def device_class(self):
-        """Return the class of the device."""
-        return "monetary"
-
-    @property
-    def unique_id(self):
-        """Return a unique ID for the sensor."""
-        return self._unique_id
