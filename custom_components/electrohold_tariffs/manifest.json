@@ -6,6 +6,7 @@
     "requirements": ["requests", "beautifulsoup4"],
     "dependencies": [],
     "codeowners": ["@ogizhelev"],
-    "version": "1.0.1",
+    "version": "2.0.0",
+    "config_flow": true,
     "integration_type": "device"
 }

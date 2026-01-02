@@ -1,0 +1,18 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Electrohold Tariffs",
+        "description": "This integration fetches electricity tariffs from Electrohold website and creates sensors for day and night rates (with VAT included)."
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Electrohold website",
+      "invalid_auth": "Invalid authentication",
+      "unknown": "Unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "Integration is already configured"
+    }
+  }
+}
