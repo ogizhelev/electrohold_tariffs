@@ -3,36 +3,32 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import timedelta
-from typing import Final
+from datetime import datetime, timedelta
+from typing import Any, Final
 
 import requests
 from bs4 import BeautifulSoup
 import voluptuous as vol
 from homeassistant.components.sensor import PLATFORM_SCHEMA, SensorEntity
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CURRENCY_EURO
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.config_validation import string
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
+from .const import (
+    CONF_TIMEZONE,
+    DEFAULT_TIMEZONE,
+    ELECTROHOLD_URL,
+    SENSOR_TYPE_DAY,
+    SENSOR_TYPE_NIGHT,
+    VAT_RATE,
+)
+
 _LOGGER: Final = logging.getLogger(__name__)
 
-# Configuration constants
-CONF_TIMEZONE: Final = "timezone"
-DEFAULT_TIMEZONE: Final = "Europe/Sofia"
-
-# Electrohold website URL
-ELECTROHOLD_URL: Final = "https://electrohold.bg/bg/sales/domakinstva/snabdyavane-po-regulirani-ceni/"
-
-# VAT rate (20%)
-VAT_RATE: Final = 1.2
-
-# Sensor types
-SENSOR_TYPE_DAY: Final = "day_tariff_euro"
-SENSOR_TYPE_NIGHT: Final = "night_tariff_euro"
-
-# Configuration schema
+# Configuration schema for YAML setup (backward compatibility)
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_TIMEZONE, default=DEFAULT_TIMEZONE): string,
 })
@@ -41,24 +37,54 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
 SCAN_INTERVAL: Final = timedelta(days=1)
 
 
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up Electrohold Tariff sensors from a config entry."""
+    # Create day and night Euro sensors
+    sensors = [
+        ElectricityTariffSensor(
+            sensor_type=SENSOR_TYPE_DAY,
+            label="Day Euro",
+            unique_id=f"{entry.entry_id}_day_euro",
+            unit_of_measurement=f"{CURRENCY_EURO}/kWh",
+        ),
+        ElectricityTariffSensor(
+            sensor_type=SENSOR_TYPE_NIGHT,
+            label="Night Euro",
+            unique_id=f"{entry.entry_id}_night_euro",
+            unit_of_measurement=f"{CURRENCY_EURO}/kWh",
+        ),
+    ]
+    
+    async_add_entities(sensors, True)
+
+
 def setup_platform(
     hass: HomeAssistant,
     config: ConfigType,
     add_entities: AddEntitiesCallback,
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
-    """Set up the electricity tariff sensors."""
+    """Set up the electricity tariff sensors from YAML (deprecated)."""
+    _LOGGER.warning(
+        "Configuration via YAML is deprecated. "
+        "Please remove it from configuration.yaml and set up the integration via the UI."
+    )
+    
     # Create day and night Euro sensors
     day_euro_sensor = ElectricityTariffSensor(
         sensor_type=SENSOR_TYPE_DAY,
         label="Day Euro",
-        unique_id="electrohold_tariff_day_euro",
+        unique_id="electrohold_tariff_day_euro_yaml",
         unit_of_measurement=f"{CURRENCY_EURO}/kWh",
     )
     night_euro_sensor = ElectricityTariffSensor(
         sensor_type=SENSOR_TYPE_NIGHT,
         label="Night Euro",
-        unique_id="electrohold_tariff_night_euro",
+        unique_id="electrohold_tariff_night_euro_yaml",
         unit_of_measurement=f"{CURRENCY_EURO}/kWh",
     )
 
@@ -86,6 +112,8 @@ class ElectricityTariffSensor(SensorEntity):
         self._attr_native_unit_of_measurement = unit_of_measurement
         self._attr_should_poll = True
         self._attr_device_class = "monetary"
+        self._last_update: datetime | None = None
+        self._base_price: float | None = None
         
         _LOGGER.info(
             "Initializing sensor %s, performing initial update",
@@ -119,6 +147,7 @@ class ElectricityTariffSensor(SensorEntity):
             # Calculate final tariffs based on sensor type
             if self._sensor_type == SENSOR_TYPE_DAY:
                 base_day = tariff_data.get("day_base", 0)
+                self._base_price = base_day
                 self._attr_state = round(base_day * VAT_RATE, 6)
                 _LOGGER.info(
                     "Day EUR tariff calculated: %s * %s = %s",
@@ -128,6 +157,7 @@ class ElectricityTariffSensor(SensorEntity):
                 )
             elif self._sensor_type == SENSOR_TYPE_NIGHT:
                 base_night = tariff_data.get("night_base", 0)
+                self._base_price = base_night
                 self._attr_state = round(base_night * VAT_RATE, 6)
                 _LOGGER.info(
                     "Night EUR tariff calculated: %s * %s = %s",
@@ -135,6 +165,9 @@ class ElectricityTariffSensor(SensorEntity):
                     VAT_RATE,
                     self._attr_state,
                 )
+
+            # Update last update timestamp
+            self._last_update = datetime.now()
 
             _LOGGER.info(
                 "Update completed successfully for %s, final state: %s",
@@ -266,4 +299,22 @@ class ElectricityTariffSensor(SensorEntity):
     def available(self) -> bool:
         """Return True if entity is available."""
         return self._attr_state is not None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra state attributes."""
+        attributes = {}
+        
+        if self._last_update:
+            attributes["last_updated"] = self._last_update.isoformat()
+        
+        if self._base_price is not None:
+            attributes["base_price_excl_vat"] = self._base_price
+            attributes["vat_rate"] = f"{round((VAT_RATE - 1) * 100)}%"
+        
+        attributes["source_url"] = ELECTROHOLD_URL
+
+
+        
+        return attributes
 
