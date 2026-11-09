@@ -52,11 +52,29 @@ VAT_MULTIPLIER: Final = 1.0 + VAT_RATE
 # Number of decimals to keep on the final per-kWh price.
 PRICE_PRECISION: Final = 6
 
+# --- Day/night schedule ----------------------------------------------------
+# Regulated two-rate windows, expressed in local Europe/Sofia wall-clock time.
+#   Night zone: 01.04–31.10 -> 23:00–07:00 ; 01.11–31.03 -> 22:00–06:00
+#   Day zone:   the complement of the night zone
+# The hours are half-open [start, end): e.g. 23:00 is night, 07:00 is day.
+TARIFF_TIMEZONE: Final = "Europe/Sofia"
+SUMMER_START_MONTH: Final = 4  # April, inclusive
+SUMMER_END_MONTH: Final = 10  # October, inclusive
+SUMMER_NIGHT_START_HOUR: Final = 23
+SUMMER_NIGHT_END_HOUR: Final = 7
+WINTER_NIGHT_START_HOUR: Final = 22
+WINTER_NIGHT_END_HOUR: Final = 6
+
 # --- Entity keys -----------------------------------------------------------
 SENSOR_KEY_DAY: Final = "day_euro"
 SENSOR_KEY_NIGHT: Final = "night_euro"
+SENSOR_KEY_CURRENT: Final = "current_euro"
 
 # --- Extra state attribute keys -------------------------------------------
 ATTR_BASE_PRICE: Final = "base_price_excl_vat"
 ATTR_VAT_RATE: Final = "vat_rate"
 ATTR_SOURCE_URL: Final = "source_url"
+ATTR_ACTIVE_TARIFF: Final = "active_tariff"
+ATTR_SEASON: Final = "season"
+ATTR_DAY_PRICE: Final = "day_price"
+ATTR_NIGHT_PRICE: Final = "night_price"
