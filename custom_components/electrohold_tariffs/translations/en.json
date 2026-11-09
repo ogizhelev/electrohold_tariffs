@@ -3,16 +3,26 @@
     "step": {
       "user": {
         "title": "Set up Electrohold Tariffs",
-        "description": "This integration fetches electricity tariffs from Electrohold website and creates sensors for day and night rates (with VAT included)."
+        "description": "This integration fetches electricity tariffs from the Electrohold website and creates sensors for the day and night rates (VAT included)."
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect to Electrohold website",
-      "invalid_auth": "Invalid authentication",
+      "cannot_connect": "Failed to connect to the Electrohold website",
+      "invalid_data": "Connected, but could not read the tariff values from the page",
       "unknown": "Unexpected error occurred"
     },
     "abort": {
       "already_configured": "Integration is already configured"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "day_euro": {
+        "name": "Day"
+      },
+      "night_euro": {
+        "name": "Night"
+      }
     }
   }
 }
