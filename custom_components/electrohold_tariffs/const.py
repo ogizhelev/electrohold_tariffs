@@ -16,19 +16,33 @@ SCAN_INTERVAL: Final = timedelta(days=1)
 DEFAULT_TIMEOUT: Final = 10
 
 # --- Parsing ---------------------------------------------------------------
-# Bulgarian labels used to locate the day/night rows on the source page.
+# The source page lays each tariff out in a table whose columns are roughly:
+#   [metering method] [day/night zone] [energy price] [FINAL price incl.
+#   network services]
+# Both price columns are published WITHOUT VAT. We want the FINAL column.
+#
+# The parser selects that value *semantically* — by matching the column header —
+# rather than by price magnitude or cell position, so it keeps working when
+# prices change, when label/rowspan cells shift the columns, or when a
+# VAT-inclusive column is added later.
+
+# Row labels identifying the two-rate day and night zones.
 DAY_KEYWORD: Final = "Дневна"
 NIGHT_KEYWORD: Final = "Нощна"
 
-# Generous sanity bounds (EUR/kWh, before VAT) used to pick the right value out
-# of a row that may contain several numbers (e.g. a fee column). They are wide
-# enough to tolerate years of regulated price changes while still rejecting
-# obviously-wrong figures such as a standing-charge in whole euros. They guard
-# against *structure* surprises, not against the current price level.
-DAY_MIN_PRICE: Final[float] = 0.10
-DAY_MAX_PRICE: Final[float | None] = 0.60
-NIGHT_MIN_PRICE: Final[float] = 0.05
-NIGHT_MAX_PRICE: Final[float | None] = 0.40
+# Header matching (compared case-insensitively). A "price column" header
+# contains one of PRICE_COLUMN_HINTS; the target column additionally matches
+# FINAL_PRICE_HINTS (the end price with network services) and must NOT match
+# VAT_HINTS (such a column already includes VAT and would be double-counted).
+PRICE_COLUMN_HINTS: Final = ("цена", "цени")
+FINAL_PRICE_HINTS: Final = ("крайн",)
+VAT_HINTS: Final = ("ддс",)
+
+# Pure sanity range (EUR/kWh, before VAT): rejects only absurd values such as a
+# zero, a parsing glitch, or a standing charge in whole euros. It is NEVER used
+# to choose between columns, only to reject a nonsensical final selection.
+PRICE_SANITY_MIN: Final[float] = 0.01
+PRICE_SANITY_MAX: Final[float] = 2.00
 
 # --- Pricing ---------------------------------------------------------------
 # Bulgarian VAT is 20%. We keep the rate and derive the multiplier from it so
