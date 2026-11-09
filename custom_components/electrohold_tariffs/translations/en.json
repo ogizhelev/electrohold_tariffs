@@ -22,6 +22,9 @@
       },
       "night_euro": {
         "name": "Night"
+      },
+      "current_euro": {
+        "name": "Current price"
       }
     }
   }

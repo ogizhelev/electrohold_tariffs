@@ -43,7 +43,7 @@ def _load_ha_free_modules() -> types.ModuleType:
     package.__path__ = [str(_COMPONENT_DIR)]
     sys.modules[_PKG] = package
 
-    for name in ("const", "models", "api"):
+    for name in ("const", "models", "api", "schedule"):
         spec = importlib.util.spec_from_file_location(
             f"{_PKG}.{name}", _COMPONENT_DIR / f"{name}.py"
         )
@@ -58,3 +58,10 @@ def _load_ha_free_modules() -> types.ModuleType:
 def api():
     """Return the HA-free ``api`` module."""
     return _load_ha_free_modules()
+
+
+@pytest.fixture(scope="session")
+def schedule():
+    """Return the HA-free ``schedule`` module."""
+    _load_ha_free_modules()
+    return sys.modules[f"{_PKG}.schedule"]
