@@ -19,13 +19,14 @@ from bs4 import BeautifulSoup
 
 from .const import (
     DAY_KEYWORD,
-    DAY_MAX_PRICE,
-    DAY_MIN_PRICE,
     DEFAULT_TIMEOUT,
     ELECTROHOLD_URL,
+    FINAL_PRICE_HINTS,
     NIGHT_KEYWORD,
-    NIGHT_MAX_PRICE,
-    NIGHT_MIN_PRICE,
+    PRICE_COLUMN_HINTS,
+    PRICE_SANITY_MAX,
+    PRICE_SANITY_MIN,
+    VAT_HINTS,
 )
 from .models import ElectroholdTariffs
 
@@ -94,75 +95,160 @@ class ElectroholdApiClient:
 
     @classmethod
     def parse_tariffs(cls, html: str) -> ElectroholdTariffs:
-        """Parse day and night base tariffs out of raw HTML.
+        """Parse the day and night *final* base prices (pre-VAT) from raw HTML.
 
         Pure function: given the same HTML it always returns the same result
-        and performs no I/O.
+        and performs no I/O. The correct value is chosen by column *meaning*
+        (header text), not by price magnitude or position, so it is resilient
+        to tariff changes and layout shifts. See :meth:`_extract_zone_price`
+        for the fallback chain when the header cannot be understood.
         """
-        rows = cls._table_rows(BeautifulSoup(html, "html.parser"))
+        soup = BeautifulSoup(html, "html.parser")
 
-        day = cls._find_price(rows, DAY_KEYWORD, DAY_MIN_PRICE, DAY_MAX_PRICE)
-        night = cls._find_price(rows, NIGHT_KEYWORD, NIGHT_MIN_PRICE, NIGHT_MAX_PRICE)
-
-        missing = [name for name, value in (("day", day), ("night", night)) if value is None]
-        if missing:
-            raise ElectroholdParseError(
-                f"Could not locate valid tariff values for: {', '.join(missing)}"
-            )
-        # Guaranteed non-None by the check above; asserted for the type checker.
-        assert day is not None and night is not None
-
-        tariffs = ElectroholdTariffs(day_base=day, night_base=night)
-        _LOGGER.debug("Parsed tariffs: %s", tariffs)
-        return tariffs
-
-    @staticmethod
-    def _table_rows(soup: BeautifulSoup) -> list[list[str]]:
-        """Return every table row on the page as a list of cell texts."""
-        rows: list[list[str]] = []
         for table in soup.find_all("table"):
-            for row in table.find_all("tr"):
-                cells = row.find_all(["td", "th"])
-                rows.append([cell.get_text(strip=True) for cell in cells])
-        return rows
+            rows = [
+                [cell.get_text(strip=True) for cell in row.find_all(["td", "th"])]
+                for row in table.find_all("tr")
+            ]
+            target_ord, price_col_count = cls._locate_final_price_column(rows)
+
+            day = cls._extract_zone_price(rows, DAY_KEYWORD, target_ord, price_col_count)
+            night = cls._extract_zone_price(
+                rows, NIGHT_KEYWORD, target_ord, price_col_count
+            )
+            if day is not None and night is not None:
+                cls._warn_on_suspicious_pair(day, night)
+                tariffs = ElectroholdTariffs(day_base=day, night_base=night)
+                _LOGGER.debug("Parsed tariffs: %s", tariffs)
+                return tariffs
+
+        raise ElectroholdParseError(
+            "Could not locate valid day and night tariff values on the page"
+        )
 
     @classmethod
-    def _find_price(
+    def _locate_final_price_column(
+        cls, rows: list[list[str]]
+    ) -> tuple[int | None, int | None]:
+        """Find the 'final price (incl. network services, excl. VAT)' column.
+
+        Returns ``(target_ordinal, price_column_count)`` where ``target_ordinal``
+        is the position of the target column *among the price columns only*
+        (so leading label/rowspan cells are irrelevant), and
+        ``price_column_count`` is how many price columns the header has. Returns
+        ``(None, None)`` when no header can be understood, signalling the caller
+        to fall back to positional extraction.
+        """
+        for row in rows:
+            # A header row describes columns and carries no euro amounts.
+            if any(cls._euro_value(cell) is not None for cell in row):
+                continue
+
+            price_cols = [
+                index
+                for index, cell in enumerate(row)
+                if cls._contains_any(cell, PRICE_COLUMN_HINTS)
+            ]
+            if len(price_cols) < 2:
+                continue  # need at least an energy column and a final column
+
+            for ordinal, index in enumerate(price_cols):
+                header = row[index]
+                if cls._contains_any(header, FINAL_PRICE_HINTS) and not cls._contains_any(
+                    header, VAT_HINTS
+                ):
+                    _LOGGER.debug(
+                        "Final-price column located: header=%r (price column %d/%d)",
+                        header,
+                        ordinal + 1,
+                        len(price_cols),
+                    )
+                    return ordinal, len(price_cols)
+
+        _LOGGER.debug("No final-price header found; will fall back to position")
+        return None, None
+
+    @classmethod
+    def _extract_zone_price(
         cls,
         rows: list[list[str]],
         keyword: str,
-        min_value: float,
-        max_value: float | None,
+        target_ord: int | None,
+        price_col_count: int | None,
     ) -> float | None:
-        """Find the first in-range euro value in a row matching ``keyword``."""
-        for cell_texts in rows:
-            if not any(keyword in text for text in cell_texts):
+        """Return the final price for the row labelled with ``keyword``.
+
+        Selection is layered, most-robust first:
+          1. Header-aligned: the Nth euro value, where N is the final-price
+             column's ordinal among price columns (immune to magnitude, leading
+             label cells and rowspan).
+          2. Positional fallback: the last (right-most) euro value — the final
+             price always sits to the right of the energy price.
+        The chosen value must pass the sanity range or it is rejected.
+        """
+        for row in rows:
+            if not any(keyword in cell for cell in row):
                 continue
-            value = cls._extract_euro_value(cell_texts, min_value, max_value)
-            if value is not None:
-                return value
+
+            euros = [
+                value for cell in row if (value := cls._euro_value(cell)) is not None
+            ]
+            if not euros:
+                continue
+
+            chosen: float | None = None
+            if (
+                target_ord is not None
+                and price_col_count is not None
+                and len(euros) == price_col_count
+                and target_ord < len(euros)
+            ):
+                chosen = euros[target_ord]
+            else:
+                chosen = euros[-1]
+                _LOGGER.warning(
+                    "Header-based column match unavailable for %s tariff; falling "
+                    "back to the right-most euro value %s in row %s",
+                    keyword,
+                    chosen,
+                    row,
+                )
+
+            if PRICE_SANITY_MIN <= chosen <= PRICE_SANITY_MAX:
+                return chosen
+
+            _LOGGER.warning(
+                "Discarding %s tariff value %s: outside sanity range [%s, %s] (row %s)",
+                keyword,
+                chosen,
+                PRICE_SANITY_MIN,
+                PRICE_SANITY_MAX,
+                row,
+            )
+
         return None
 
     @staticmethod
-    def _extract_euro_value(
-        cell_texts: list[str],
-        min_value: float,
-        max_value: float | None,
-    ) -> float | None:
-        """Extract the first euro value within ``[min_value, max_value]``."""
-        for text in cell_texts:
-            match = _EURO_VALUE_PATTERN.search(text)
-            if not match:
-                continue
-            value = float(match.group(1).replace(",", "."))
-            if value < min_value or (max_value is not None and value > max_value):
-                _LOGGER.debug(
-                    "Discarding out-of-range euro value %s from %r (bounds [%s, %s])",
-                    value,
-                    text,
-                    min_value,
-                    max_value,
-                )
-                continue
-            return value
-        return None
+    def _warn_on_suspicious_pair(day: float, night: float) -> None:
+        """Log if the night price is not cheaper than the day price."""
+        if night > day:
+            _LOGGER.warning(
+                "Night tariff %s is higher than day tariff %s — the source layout "
+                "may have changed; please verify",
+                night,
+                day,
+            )
+
+    @staticmethod
+    def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
+        """Return True if ``text`` contains any needle (case-insensitive)."""
+        lowered = text.lower()
+        return any(needle in lowered for needle in needles)
+
+    @staticmethod
+    def _euro_value(text: str) -> float | None:
+        """Return the first euro amount in ``text`` as a float, or None."""
+        match = _EURO_VALUE_PATTERN.search(text)
+        if not match:
+            return None
+        return float(match.group(1).replace(",", "."))
